@@ -22,8 +22,11 @@ class TrainingManager {
 
     async checkServerToken() {
         try {
-            // Try to get token from local server (which handles refresh)
-            const response = await fetch('/api/token');
+            // Note: In a deployed environment (GitHub Pages), this will fail unless server.py is running locally 
+            // and the browser allows mixed content or the API is proxied.
+            // For now, we assume server.py is running on localhost:8000.
+            const apiBase = window.location.hostname === 'localhost' ? '' : 'http://localhost:8000';
+            const response = await fetch(`${apiBase}/api/token`);
             if (response.ok) {
                 const data = await response.json();
                 if (data.access_token) {
@@ -75,7 +78,7 @@ class TrainingManager {
             const top = (window.innerHeight / 2) - (height / 2);
 
             window.open(
-                '/oauth/authorize',
+                `${window.location.hostname === 'localhost' ? '' : 'http://localhost:8000'}/oauth/authorize`,
                 'StravaAuth',
                 `width=${width},height=${height},top=${top},left=${left}`
             );
@@ -668,7 +671,8 @@ class TrainingManager {
 
         // 2. Clear server storage
         try {
-            await fetch('/api/logout');
+            const apiBase = window.location.hostname === 'localhost' ? '' : 'http://localhost:8000';
+            await fetch(`${apiBase}/api/logout`);
         } catch (e) {
             console.error('Error logging out from server:', e);
         }
