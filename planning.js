@@ -64,6 +64,7 @@ class TrainingManager {
         this.generateBtn = document.getElementById('generateScheduleBtn');
         this.calendarView = document.getElementById('calendarView');
         this.schedulePlaceholder = document.getElementById('schedulePlaceholder');
+        this.syncGarminBtn = document.getElementById('syncGarminBtn');
 
         // History Elements
         this.historyPlaceholder = document.getElementById('historyPlaceholder');
@@ -148,6 +149,11 @@ class TrainingManager {
         };
         if (velotafDistance) velotafDistance.addEventListener('input', updateVelotafKm);
         if (velotafDaysCount) velotafDaysCount.addEventListener('input', updateVelotafKm);
+
+        // Garmin Sync
+        if (this.syncGarminBtn) {
+            this.syncGarminBtn.addEventListener('click', () => this.syncToGarmin());
+        }
     }
 
     updateConstraints() {
@@ -159,6 +165,11 @@ class TrainingManager {
         this.constraints.maxHours = parseInt(this.maxHoursInput.value) || 10;
         this.constraints.hasHomeTrainer = document.getElementById('hasHomeTrainer')?.checked || false;
         this.constraints.hasVelotaf = document.getElementById('hasVelotaf')?.checked || false;
+
+        if (this.constraints.hasVelotaf) {
+            this.constraints.velotafDistance = parseInt(document.getElementById('velotafDistance')?.value) || 20;
+            this.constraints.velotafDaysCount = parseInt(document.getElementById('velotafDaysCount')?.value) || 3;
+        }
     }
 
     handleOAuthSuccess(data) {
@@ -347,18 +358,12 @@ class TrainingManager {
         const daysOfWeek = ['Dim', 'Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam'];
 
         const today = new Date();
-        // Start from current week monday
         const startOfPlanning = this.getPreviousMonday(today);
 
-        // Loop week by week
         let currentDay = new Date(startOfPlanning);
         let weekCount = 1;
 
         while (currentDay <= RACE_DATE) {
-            const weekNumber = this.getWeekNumber(currentDay);
-            const isRaceWeek = currentDay > new Date(RACE_DATE.getTime() - 7 * 24 * 60 * 60 * 1000); // Rough check
-
-            // Phase determination
             const weeksUntilRace = Math.floor((RACE_DATE - currentDay) / (7 * 24 * 60 * 60 * 1000));
             let phase = 'BASE';
             let phaseDesc = 'Fondation & Endurance';
@@ -384,31 +389,45 @@ class TrainingManager {
             };
             weekPlan.weekEnd.setDate(currentDay.getDate() + 6);
 
+            // Track if a long ride was already done this week
+            let longRideDoneThisWeek = false;
+
+            // First pass: check activities done this week (for the current week being processed)
+            for (let i = 0; i < 7; i++) {
+                const checkDate = new Date(currentDay);
+                checkDate.setDate(currentDay.getDate() + i);
+
+                if (this.allActivities) {
+                    const dayActivities = this.allActivities.filter(a => {
+                        const aDate = new Date(a.start_date);
+                        return aDate.toDateString() === checkDate.toDateString();
+                    });
+
+                    if (dayActivities.some(a => a.distance > 50000 || a.moving_time > 9000)) { // ~2.5h or 50km
+                        longRideDoneThisWeek = true;
+                    }
+                }
+            }
+
             for (let i = 0; i < 7; i++) {
                 const dayDate = new Date(currentDay);
                 dayDate.setDate(currentDay.getDate() + i);
 
-                if (dayDate > RACE_DATE) break; // Don't go past race day
+                if (dayDate > RACE_DATE) break;
 
                 const dayIndex = dayDate.getDay();
-                const isPast = dayDate < today && dayDate.getDate() !== today.getDate();
-                const isToday = dayDate.getDate() === today.getDate() && dayDate.getMonth() === today.getMonth();
-                const isRaceDay = dayDate.getTime() === RACE_DATE.getTime();
+                const isPast = dayDate < today && dayDate.toDateString() !== today.toDateString();
+                const isToday = dayDate.toDateString() === today.toDateString();
+                const isRaceDay = dayDate.toDateString() === RACE_DATE.toDateString();
 
-                let workout = null;
                 let completedActivities = [];
-
-                // Find ALL Strava activities for this day
                 if (this.allActivities) {
                     completedActivities = this.allActivities.filter(a => {
                         const aDate = new Date(a.start_date);
-                        return aDate.getDate() === dayDate.getDate() &&
-                            aDate.getMonth() === dayDate.getMonth() &&
-                            aDate.getFullYear() === dayDate.getFullYear();
+                        return aDate.toDateString() === dayDate.toDateString();
                     });
                 }
 
-                // Build workouts array for this day
                 let workouts = [];
 
                 if (isRaceDay) {
@@ -425,13 +444,29 @@ class TrainingManager {
                     const isTrainingDay = this.constraints.days.includes(dayIndex);
 
                     if (completedActivities.length > 0) {
-                        // Add ALL completed activities
-                        completedActivities.forEach(activity => {
+                        // Group commutes
+                        const commutes = completedActivities.filter(a => a.commute);
+                        const others = completedActivities.filter(a => !a.commute);
+
+                        if (commutes.length > 0) {
+                            const totalDist = commutes.reduce((sum, a) => sum + a.distance, 0);
+                            const totalTime = commutes.reduce((sum, a) => sum + a.moving_time, 0);
+                            workouts.push({
+                                type: 'commute',
+                                sport: 'ride',
+                                title: commutes.length > 1 ? 'Vélotaf (A/R)' : 'Vélotaf',
+                                description: `${(totalDist / 1000).toFixed(1)}km total`,
+                                duration: this.formatDuration(totalTime),
+                                completed: true
+                            });
+                        }
+
+                        others.forEach(activity => {
                             const dist = (activity.distance / 1000).toFixed(1);
                             const elev = Math.round(activity.total_elevation_gain);
                             const sport = activity.type === 'Run' ? 'run' : 'ride';
                             workouts.push({
-                                type: activity.commute ? 'commute' : 'base',
+                                type: 'base',
                                 sport: sport,
                                 title: activity.name,
                                 description: `${dist}km | ${elev}m D+`,
@@ -440,8 +475,20 @@ class TrainingManager {
                             });
                         });
                     } else if (isTrainingDay) {
-                        // No activity done — show planned workout
-                        workout = this.getWorkoutForDay(dayIndex, phase);
+                        let workout = this.getWorkoutForDay(dayIndex, phase);
+
+                        // Check if we should skip long ride
+                        if (workout.type === 'long_ride' && longRideDoneThisWeek) {
+                            workout = {
+                                type: 'base',
+                                sport: 'ride',
+                                title: 'Récupération Active',
+                                description: 'Sortie longue déjà effectuée cette semaine. Roulez souple.',
+                                duration: '1h00',
+                                difficulty: 'Faible'
+                            };
+                        }
+
                         if (isPast) {
                             workout.completed = false;
                             workout.title += ' (Manqué)';
@@ -449,7 +496,27 @@ class TrainingManager {
                         }
                         workouts.push(workout);
                     }
-                    // If no training day and no activities => rest day (empty workouts)
+
+                    // Schedule future commuting if enabled
+                    if (!isPast && !isRaceDay && this.constraints.hasVelotaf) {
+                        // Simple logic to distribute velotaf: Mon(1), Wed(3), Fri(5), Tue(2), Thu(4)
+                        const velotafOrder = [1, 3, 5, 2, 4];
+                        const count = this.constraints.velotafDaysCount || 0;
+                        const velotafDays = velotafOrder.slice(0, count);
+
+                        if (velotafDays.includes(dayIndex)) {
+                            const dist = this.constraints.velotafDistance || 20;
+                            workouts.push({
+                                type: 'commute',
+                                sport: 'ride',
+                                title: 'Vélotaf (Z2)',
+                                description: `Entraînement Z2 | ${dist}km A/R`,
+                                duration: 'Prévu',
+                                difficulty: 'Faible',
+                                completed: false
+                            });
+                        }
+                    }
                 }
 
                 weekPlan.days.push({
@@ -463,8 +530,6 @@ class TrainingManager {
             }
 
             plan.push(weekPlan);
-
-            // Advance to next week
             currentDay.setDate(currentDay.getDate() + 7);
             weekCount++;
         }
@@ -481,18 +546,55 @@ class TrainingManager {
             let desc = 'Endurance fondamentale (Z2).';
             let title = 'Sortie Longue';
 
+            let steps = [];
             if (phase === 'BUILD') {
                 duration = '3h30 - 4h00';
                 desc = 'Endurance avec 3x15min tempo (Z3) dans les bosses.';
                 title = 'Endurance + Tempo';
-            } else if (phase === 'PEAK') { // Peak
+                steps = [
+                    { type: 'warmup', duration: '20:00', target: 'ZONE_2' },
+                    {
+                        type: 'repeat', count: 3, steps: [
+                            { type: 'interval', duration: '15:00', target: 'ZONE_3' },
+                            { type: 'recovery', duration: '5:00', target: 'ZONE_1' }
+                        ]
+                    },
+                    { type: 'cooldown', duration: '10:00', target: 'ZONE_2' }
+                ];
+            } else if (phase === 'PEAK') {
                 duration = '4h00+';
                 desc = 'Simulation course. Enchaînement de bosses courtes à haute intensité.';
                 title = 'Simulation Flandrienne';
+                steps = [
+                    { type: 'warmup', duration: '30:00', target: 'ZONE_2' },
+                    {
+                        type: 'repeat', count: 10, steps: [
+                            { type: 'interval', duration: '1:00', target: 'ZONE_5' },
+                            { type: 'recovery', duration: '5:00', target: 'ZONE_2' }
+                        ]
+                    },
+                    { type: 'cooldown', duration: '30:00', target: 'ZONE_2' }
+                ];
             } else if (phase === 'TAPER') {
                 duration = '2h00';
                 desc = 'Sortie souple, quelques accélérations courtes pour débloquer.';
                 title = 'Maintien';
+                steps = [
+                    { type: 'warmup', duration: '15:00', target: 'ZONE_2' },
+                    {
+                        type: 'repeat', count: 4, steps: [
+                            { type: 'interval', duration: '0:30', target: 'ZONE_5' },
+                            { type: 'recovery', duration: '4:30', target: 'ZONE_1' }
+                        ]
+                    },
+                    { type: 'cooldown', duration: '10:00', target: 'ZONE_2' }
+                ];
+            } else {
+                steps = [
+                    { type: 'warmup', duration: '10:00', target: 'ZONE_1' },
+                    { type: 'interval', duration: '160:00', target: 'ZONE_2' },
+                    { type: 'cooldown', duration: '10:00', target: 'ZONE_1' }
+                ];
             }
 
             return {
@@ -501,7 +603,8 @@ class TrainingManager {
                 title: title,
                 description: desc,
                 duration: duration,
-                difficulty: phase === 'TAPER' ? 'Faible' : 'Moyenne+ '
+                difficulty: phase === 'TAPER' ? 'Faible' : 'Moyenne+ ',
+                steps: steps
             };
         }
 
@@ -509,21 +612,65 @@ class TrainingManager {
         if (dayIndex === 2 || dayIndex === 4) {
             let workout = { type: 'intervals', sport: 'ride', duration: '1h00-1h30', difficulty: 'Élevée' };
 
+            let steps = [];
             if (phase === 'BASE') {
                 workout.title = 'Vélocité / Force';
                 workout.description = 'Travail de cadence (100rpm+) ou force (50rpm) en Z3.';
+                steps = [
+                    { type: 'warmup', duration: '15:00', target: 'ZONE_1' },
+                    { type: 'interval', duration: '10:00', target: 'ZONE_3', description: 'Cadence haute' },
+                    { type: 'recovery', duration: '5:00', target: 'ZONE_1' },
+                    { type: 'interval', duration: '10:00', target: 'ZONE_3', description: 'Force basse cadence' },
+                    { type: 'cooldown', duration: '15:00', target: 'ZONE_1' }
+                ];
             } else if (phase === 'BUILD') {
                 workout.title = 'Seuil (Z4)';
                 workout.description = '2 x 15min au seuil anaérobie. Récup 5min.';
+                steps = [
+                    { type: 'warmup', duration: '15:00', target: 'ZONE_1' },
+                    {
+                        type: 'repeat', count: 2, steps: [
+                            { type: 'interval', duration: '15:00', target: 'ZONE_4' },
+                            { type: 'recovery', duration: '5:00', target: 'ZONE_1' }
+                        ]
+                    },
+                    { type: 'cooldown', duration: '15:00', target: 'ZONE_1' }
+                ];
             } else if (phase === 'PEAK') {
                 workout.title = 'PMA / VO2 Max';
                 workout.description = 'Intervalles courts: 3 séries de (30s max / 30s récup) x 10.';
+                steps = [
+                    { type: 'warmup', duration: '15:00', target: 'ZONE_1' },
+                    {
+                        type: 'repeat', count: 3, steps: [
+                            {
+                                type: 'repeat', count: 10, steps: [
+                                    { type: 'interval', duration: '0:30', target: 'ZONE_5' },
+                                    { type: 'recovery', duration: '0:30', target: 'ZONE_1' }
+                                ]
+                            },
+                            { type: 'recovery', duration: '5:00', target: 'ZONE_1' }
+                        ]
+                    },
+                    { type: 'cooldown', duration: '10:00', target: 'ZONE_1' }
+                ];
             } else { // Taper
                 workout.title = 'Rappels d\'intensité';
                 workout.description = '2 x 5min au seuil. Reste très souple.';
                 workout.duration = '1h00';
                 workout.difficulty = 'Moyenne';
+                steps = [
+                    { type: 'warmup', duration: '15:00', target: 'ZONE_1' },
+                    {
+                        type: 'repeat', count: 2, steps: [
+                            { type: 'interval', duration: '5:00', target: 'ZONE_4' },
+                            { type: 'recovery', duration: '5:00', target: 'ZONE_1' }
+                        ]
+                    },
+                    { type: 'cooldown', duration: '10:00', target: 'ZONE_1' }
+                ];
             }
+            workout.steps = steps;
             return workout;
         }
 
@@ -543,6 +690,10 @@ class TrainingManager {
         if (this.calendarView) {
             this.calendarView.classList.remove('hidden');
             this.calendarView.innerHTML = ''; // Clear
+        }
+
+        if (this.syncGarminBtn) {
+            this.syncGarminBtn.classList.remove('hidden');
         }
 
         const container = document.createElement('div');
@@ -701,11 +852,96 @@ class TrainingManager {
         // 5. Clear Data Displays
         if (this.historyContent) this.historyContent.classList.add('hidden');
         if (this.historyPlaceholder) this.historyPlaceholder.classList.remove('hidden');
+        if (this.syncGarminBtn) this.syncGarminBtn.classList.add('hidden');
 
         // Clear schedule or just regenerate with defaults?
         // Let's reload the page to be clean, or just re-generate empty schedule
         // Reloading is safer to clear everything
         window.location.reload();
+    }
+
+    async syncToGarmin() {
+        if (!this.syncGarminBtn) return;
+
+        // Collect plan (all future target workouts)
+        const plan = this.createTrainingPlan();
+
+        // Flatten plan to just days/workouts
+        const allWorkouts = [];
+        plan.forEach(week => {
+            week.days.forEach(day => {
+                const dateISO = day.date.toISOString().split('T')[0];
+                day.workouts.forEach(w => {
+                    // We only want to send non-completed, non-commute, non-race workouts 
+                    // that have steps (implied by type intervals/long_ride)
+                    if (w.type === 'intervals' || w.type === 'long_ride') {
+                        allWorkouts.push({
+                            date: dateISO,
+                            title: w.title,
+                            description: w.description,
+                            steps: this.getStepsForWorkout(w),
+                            is_race: false
+                        });
+                    }
+                });
+            });
+        });
+
+        if (allWorkouts.length === 0) {
+            alert('Aucun entraînement futur à synchroniser.');
+            return;
+        }
+
+        // UI state
+        const originalText = this.syncGarminBtn.innerHTML;
+        this.syncGarminBtn.classList.add('syncing');
+        this.syncGarminBtn.innerHTML = '<span>Synchronisation</span>';
+        this.syncGarminBtn.disabled = true;
+
+        try {
+            const apiBase = window.location.hostname === 'localhost' ? '' : 'http://localhost:8000';
+            const response = await fetch(`${apiBase}/api/garmin/sync`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(allWorkouts)
+            });
+
+            const result = await response.json();
+
+            if (result.error) {
+                throw new Error(result.error);
+            }
+
+            const successCount = result.results?.filter(r => r.status === 'success').length || 0;
+            const errorCount = (result.results?.length || 0) - successCount;
+
+            let msg = `✅ ${successCount} entraînements synchronisés avec succès.`;
+            if (errorCount > 0) msg += `\n❌ ${errorCount} erreurs rencontrées.`;
+
+            alert(msg);
+
+        } catch (e) {
+            console.error('Garmin Sync Error:', e);
+            alert(`❌ Erreur lors de la synchronisation : ${e.message}`);
+        } finally {
+            this.syncGarminBtn.classList.remove('syncing');
+            this.syncGarminBtn.innerHTML = originalText;
+            this.syncGarminBtn.disabled = false;
+        }
+    }
+
+    getStepsForWorkout(w) {
+        // This is a bit redundant with generate_plan.py but we need it here 
+        // because the frontend is the source of truth for the *user-configured* plan
+
+        // Let's implement a simple mapping or just use titles if we don't have step details in JS object
+        // Wait, the JS object in planning.js doesn't have the "steps" array like generate_plan.py!
+        // I need to add them or re-generate them on the fly.
+
+        // Let's check how getWorkoutForDay is implemented in planning.js
+        // It returns { type, sport, title, description, duration, difficulty }
+        // I'll update getWorkoutForDay to include steps.
+        return w.steps || [];
     }
 }
 

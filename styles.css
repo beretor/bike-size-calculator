@@ -2456,3 +2456,58 @@ body {
         line-clamp: 2;
     }
 }
+
+/* Garmin Button & Planning Actions */
+.planning-actions {
+    display: flex;
+    gap: 1rem;
+    margin-top: 1.5rem;
+    width: 100%;
+}
+
+.planning-actions .calculate-btn {
+    flex: 1;
+    margin-top: 0;
+}
+
+.garmin-btn {
+    background: linear-gradient(135deg, #007cc3 0%, #005a8c 100%) !important;
+    box-shadow: 0 4px 15px rgba(0, 124, 195, 0.3) !important;
+}
+
+.garmin-btn:hover {
+    background: linear-gradient(135deg, #008be0 0%, #006eb1 100%) !important;
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(0, 124, 195, 0.4) !important;
+}
+
+.garmin-btn.syncing {
+    opacity: 0.7;
+    cursor: wait;
+    pointer-events: none;
+}
+
+.garmin-btn.syncing span::after {
+    content: '...';
+    animation: dots 1.5s steps(4, end) infinite;
+}
+
+@keyframes dots {
+
+    0%,
+    20% {
+        content: '';
+    }
+
+    40% {
+        content: '.';
+    }
+
+    60% {
+        content: '..';
+    }
+
+    80% {
+        content: '...';
+    }
+}

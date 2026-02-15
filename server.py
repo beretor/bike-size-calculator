@@ -11,6 +11,7 @@ import os
 import urllib.parse
 import urllib.request
 import webbrowser
+import sys
 from pathlib import Path
 
 # ⚠️ CONFIGURE THESE WITH YOUR STRAVA API CREDENTIALS
@@ -20,6 +21,11 @@ REDIRECT_URI = "http://localhost:8000/oauth/callback"
 
 PORT = 8000
 STATIC_DIR = Path(__file__).parent
+
+
+class RobustHTTPServer(http.server.HTTPServer):
+    """Server that allows address reuse."""
+    allow_reuse_address = True
 
 
 class OAuthHandler(http.server.SimpleHTTPRequestHandler):
@@ -44,9 +50,46 @@ class OAuthHandler(http.server.SimpleHTTPRequestHandler):
         elif parsed.path == "/api/logout":
             # Handle logout
             self.handle_logout()
+        elif parsed.path == "/api/garmin/sync":
+            # Garmin Sync is POST only for safety/cleanliness, 
+            # but I'll return 405 if GET.
+            self.send_error(405, "Method Not Allowed")
         else:
             # Serve static files
             super().do_GET()
+
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        print(f"DEBUG: POST Request path: {parsed.path}")
+
+        if parsed.path == "/api/garmin/sync":
+            self.handle_garmin_sync()
+        else:
+            self.send_error(404, "Not Found")
+
+    def handle_garmin_sync(self):
+        """Handle Garmin workout sync request."""
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length)
+            plan_data = json.loads(post_data.decode('utf-8'))
+
+            import garmin_sync
+            result = garmin_sync.sync_workouts(plan_data)
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps(result).encode())
+
+        except Exception as e:
+            print(f"ERROR in garmin sync: {e}")
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": str(e)}).encode())
 
     def redirect_to_strava(self):
         """Redirect user to Strava authorization page."""
@@ -305,11 +348,19 @@ def main():
     print(f"🔐 OAuth callback at {REDIRECT_URI}")
     print(f"\nPress Ctrl+C to stop.\n")
 
-    with http.server.HTTPServer(("", PORT), OAuthHandler) as httpd:
-        try:
-            httpd.serve_forever()
-        except KeyboardInterrupt:
-            print("\n👋 Server stopped.")
+    try:
+        with RobustHTTPServer(("", PORT), OAuthHandler) as httpd:
+            try:
+                httpd.serve_forever()
+            except KeyboardInterrupt:
+                print("\n👋 Server stopped.")
+    except OSError as e:
+        if e.errno == 48:
+            print(f"❌ Error: Port {PORT} is already in use.")
+            print(f"💡 Try running: lsof -i :{PORT} to find the process ID, then kill it.")
+            sys.exit(1)
+        else:
+            raise
 
 
 if __name__ == "__main__":
